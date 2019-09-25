@@ -1,0 +1,1104 @@
+---
+title: "Mother's curse and indirect genetic effects: do males matter to mitochondrial genome evolution?"
+output:
+  html_document:
+    code_folding: hide
+    depth: 1
+    number_sections: no
+    theme: yeti
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, cache=FALSE, include=FALSE}
+library(knitr)
+opts_chunk$set(warning=FALSE, message=FALSE) # Suppress warnings in the HTML output
+```
+
+
+
+## Load R packages and data
+```{r warning=FALSE, message=FALSE}
+# All but 1 of these packages can be easily installed from CRAN.
+# However it was harder to install the showtext package. On Mac, I did this:
+# installed 'homebrew' using Terminal: ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)" 
+# installed 'libpng' using Terminal: brew install libpng
+# installed 'showtext' in R using: devtools::install_github("yixuan/showtext")  
+
+library(gridExtra)
+library(dplyr) # needed for the '%>%' operator, and for useful functions for re-shaping the data
+library(brms) # 'Bayesian regression models'
+library(stringr) # for manipulating character strings
+library(reshape2) # for 1 handy function: melt()
+library(ggplot2) # Nice plots
+library(ggridges) # 'Joy Division' plots
+library(RColorBrewer) # nice colours
+library(viridis) # nice colours
+library(pander) # For nice table
+library(knitr) # For HTML document options
+library(showtext) # For fancy Google font in figures
+library(purrr) # For neater operations on lists
+library(tidyr) # change between long and wide data formats
+library(kableExtra) # for scrolling tables
+library(mice) # for imputing missing data
+library(ggbeeswarm) # for bee swarm plots
+library(bayestestR) # for Bayesian p-value equivalent (p_direction function)
+library(tidybayes) # for "eye plots"
+library(tibble) # for rownames_to_column function
+options(mc.cores = 4)
+panderOptions('round', 2)
+panderOptions('keep.trailing.zeros', TRUE)
+
+# Install a nice font from Google Fonts
+font_add_google(name = "Lato", family = "Lato", regular.wt = 400, bold.wt = 700)
+showtext_auto()
+
+# Load and clean the raw data
+load_data <- function(filepath){
+  data <- read.csv(filepath, stringsAsFactors = FALSE)
+  data$Vial <- factor(data$Vial, levels = 1:4)
+  data$Order.of.exposure <- "Second"
+  for(i in 1:max(data$Female)) {
+    if(data$Male.exposure[data$Female == i][1] == "H") data$Order.of.exposure[data$Female == i] <- "First"
+  }
+  data$Male.exposure[data$Male.exposure == "H"] <- "High"
+  data$Male.exposure[data$Male.exposure == "L"] <- "Low"
+  data$Male.exposure <- relevel(factor(data$Male.exposure), ref = "Low") # Make high male contact the reference
+  data$Mortality <- as.numeric(as.factor(data$Mortality)) - 1 # Females who survived scored as 0, those that died scored as 1
+  data
+}  
+
+experiment1 <- load_data("data/experiment_1_male_effects.csv")
+experiment2 <- load_data("data/experiment_2_female_effects.csv")
+
+# Load up the cleaned data showing the survival of females in Expts 1 and 2
+get_survival_data <- function(dataset){
+  
+  dead.ones <- dataset %>%
+    filter(Mortality == 1) %>%
+    split(.$Female) %>%
+    map(~ .x[1,]) %>% bind_rows() %>% 
+    select(Block, Female, Haplotype, Male.exposure, Vial, Order.of.exposure) %>%
+    mutate(censored = 0)
+  
+  survivors <- dataset %>%
+    filter(Mortality == 0) %>%
+    split(.$Female) %>%
+    map(function(x) x[nrow(x),]) %>% bind_rows() %>% 
+    select(Block, Female, Haplotype, Male.exposure, Vial, Order.of.exposure) %>%
+    mutate(censored = 1)
+  
+  rbind(dead.ones, survivors)
+}
+
+survival_data_expt1 <- get_survival_data(experiment1)
+survival_data_expt2 <- get_survival_data(experiment2)
+```
+
+
+## Modelling approach
+
+We analysed the data using Bayesian generalised linear mixed models in the `brms` package for R. 
+
+### Distribution of the response variable
+Since our response variable (number of progeny produced) is count data, and is somewhat over-dispersed and countains zeros for vials in which the female had died, we specified a zero-inflated negative binomial error distribution. This is similar to a zero-inflated Poisson distibution, but is more flexible because the mean and variance are not constrained to be the same. We verified that the models fit eh data well using posterior predictive checks (see below).
+
+### Group-level effects (aka random effects)
+We modelled group-specific means for 'Block' and (where relevant) 'Female' as 'random intercepts'. The 'Block' effect accounts for differences in the response variable between experimental blocks (e.g. to variance in temperature or composition of the fly food). The 'Female' effect models variation in progeny number between different females, and prevents the model from incurring pseudoreplication due to the fact that we recorded multiple (typically 4) observations per female. The female-level random effect is not needed in the multivariate model of Experiment 1 (since there is only 1 observation of each female's set of 4 vials).
+
+### Population-level effects (aka fixed effects)
+Because the present study is a planned experiment focusing on the effect of mtDNA haplotype, we selected a single model that allows us to test the main effects and interaction effects that were _a priori_ of interest. The model of Experiment 2 contained the following three fixed effects, and all the possible 2- and 3-way interactions:
+
+**Haplotype**: The mtDNA haplotype of the males (in experiment 1) or females (experiment 2).
+
+**Age category (also called 'vial')**: Is the focal observation from the 1st, 2nd, 3rd, or 4th vial in which the female lived? This is a proxy for the age category of the flies (1: youngest, 4: oldest). Treated as a discrete variable, since there was a clearly non-linear relationship with fecundity.
+
+**Order of exposure**: Was this female allocated to the high male exposure treatment (coded as "First") or the low exposure treatment ("Second") in her first vial?
+
+The Age category effect was not fitted in the model of experiment 1 (see below).
+
+
+### Model 1 vs Model 2 differences
+The model of Experiment 1 is a multivariate model, with the data from each female's 4 vials as a 4-component response. This was done (over the more conventional method used for Experiment 2) because it makes it easier to set a prior on Vial 1 specifically, which we wanted to do because the haplotype treatment should have no effect on females that have not yet met any males from the mitochondrial strains. The model of Experiment 2 is a univariate model, with vial treated as a fixed factor, and vials from the same female being grouped by the 'Female ID' random effect. 
+
+### Priors 
+We used the standard priors of the the `brms` package with one exception (see below), namely `student_t(3, 3, 10)` for the intercept, `student_t(3, 0, 10)` for the random effects, and `gamma(0.01, 0.01)` for the shape parameter of the negative binomial distribution. These priors are regarded as weakly informative. 
+
+For experiment 1, we have a strong prior belief that there can be no causal effect of male mitochondrial DNA until after a female has actually encountered our mitoline males. We thus used a prior specification that forced the effect of *Haplotype* to be zero among females that had not yet encountered the mitoline males, i.e. females in the "Order of exposure = Second" treatment who were in their first vial.
+
+### Analysing the models
+
+To test for significant differences between treatment groups (contingent on the effects of the other fixed and random factors), we computed the posterior mean estimates for each group, using the `fitted()` function. We also calculated the posterior differences between pairs of means, which can be used for hypothesis testing (we interpret differences with 95% credible intervals that exclude zero as evidence for a non-zero effect, with bigger differences from zero representing stronger evidence). 
+
+### Code to run the model of Experiment 1 or 2
+
+```{r create_results}
+# Helper function get the Bayesian R^2 + 95% CIs for a brms model, and neaten them for printing
+neat.R2 <- function(model){
+  R2 <- bayes_R2(model) %>% round(2)
+  paste(R2[1,1], " (95% CIs = ", R2[1,3], "-", R2[1,4], ")", sep = "")
+}
+
+
+run_model <- function(fixed_effects, experiment){
+  
+  if(experiment == 1) dataset <- experiment1
+  else dataset <- experiment2
+  
+  # Set up the data for a multivariate model
+  my_data <- dataset %>% 
+    filter(!is.na(Total.offspring)) %>%
+    select(Vial, Total.offspring, Haplotype, Order.of.exposure, Female, Block) %>%
+    mutate(Order.of.exposure = relevel(factor(Order.of.exposure), ref = "Second")) %>%
+    spread(Vial, Total.offspring) %>%
+    rename_at(5:8, ~ paste("Vial_", .x, sep = ""))
+  
+  # Create 10 imputed datasets with the escaped/missed females' fecundities filled in
+  # NB in Block 4, an accident meant that we could not count the fecundity for vial 4
+  # Imputing the data means that we do not have to discard all the data from vials 1-3
+  imputed_data <- mice(my_data, m = 10, print = FALSE) 
+  
+  my_formula <- as.formula(paste("mvbind(Vial_1, Vial_2, Vial_3, Vial_4) ~", fixed_effects, "(1|p|Block)"))
+  
+  # for experiment 1, provide a strong prior that mito haplotype has zero effect on females that 
+  # have so far never been exposed to any mitoline males. All other priors are left weak
+  if(any(str_detect(as.character(my_formula), "Haplotype")) & experiment == 1){
+
+    prior <- c(prior(normal(0, 0.001), resp = "Vial1", coef = "HaplotypeBrownsville"),
+               prior(normal(0, 0.001), resp = "Vial1", coef = "HaplotypeDahomey"),
+               prior(normal(0, 0.001), resp = "Vial1", coef = "HaplotypeIsrael"),
+               prior(normal(0, 0.001), resp = "Vial1", coef = "HaplotypeSweden"))
+    
+    model <- brm_multiple(
+      my_formula, 
+      data = imputed_data, 
+      family = "zero_inflated_negbinomial",
+      save_all_pars = TRUE,
+      cores = 4, chains = 4, iter = 10000, init = 0, seed = 1, # many iterations, for accurate bridge sampling (see ?post_prob). 10 * 10,000 = 100,000
+      control = list(adapt_delta = 0.9999, max_treedepth = 15), 
+      prior = prior) 
+  
+  # if Haplotype is not in the model, or it is Experiment 2 data, just use the default priors
+  } else {
+    model <- brm_multiple(
+      my_formula, 
+      data = imputed_data, 
+      family = "zero_inflated_negbinomial",
+      save_all_pars = TRUE,
+      cores = 4, chains = 4, iter = 10000, init = 0, seed = 1, 
+      control = list(adapt_delta = 0.9999, max_treedepth = 15)) 
+  }
+  
+  R2 <- neat.R2(model) 
+  
+  # Define new data for prediction
+  new <- my_data %>% 
+    select(Haplotype, Order.of.exposure) %>% 
+    distinct() %>% mutate(Var1 = 1:10)
+  
+  # Get predicted means
+  predictions <- left_join(
+    melt(fitted(model, newdata = new, re_formula = NA)) %>% 
+      spread(Var2, value), new, by = "Var1") %>% 
+    rename(Vial = Var3, `Order of exposure` = Order.of.exposure) %>%
+    mutate(`Male exposure` = 
+             ifelse((Vial %in% c("Vial1", "Vial3") & `Order of exposure` == "First") |
+                      (Vial %in% c("Vial2", "Vial4") & `Order of exposure` == "Second"), 
+                    "Yes", "No"),
+           Vial = str_replace_all(as.character(Vial), "Vial", ""))
+  
+  # Get the posterior predicted value of each vial, treatment and haplotype combination
+  posterior_by_vial <- melt(fitted(model, 
+                                   newdata = new, 
+                                   re_formula = NA,
+                                   summary = FALSE)) %>%
+    left_join(new, by = c("Var2" = "Var1")) %>% 
+    select(-Var2) %>% rename(sample = Var1, Vial = Var3) %>% as_tibble()
+  
+  # Return the model and the other useful objects
+  list(model = model, 
+       R2 = R2, 
+       means = predictions,
+       posterior_by_vial = posterior_by_vial)
+}
+```
+
+### Code to calculate posterior estimates of group means and differences between these means
+
+```{r}
+make_difference_tables <- function(posterior_by_vial){
+  
+  posterior_by_vial <- posterior_by_vial %>% 
+    select(sample, Vial, value, Haplotype, Order.of.exposure)
+  
+  posterior_group_means <- posterior_by_vial %>% 
+    group_by(Vial, Order.of.exposure, Haplotype) %>%
+    summarise(summ = list(posterior_summary(value))) %>%
+    ungroup() %>% rowwise() %>%
+    mutate(Estimate = summ[,1], Est.Error = summ[,2],
+           Q2.5 = summ[,3], Q97.5 = summ[,4]) %>% 
+    select(-summ) 
+  
+  mean_total_progeny <- posterior_by_vial %>% 
+    select(-Vial) %>%
+    group_by(Haplotype, Order.of.exposure, sample) %>% 
+    summarise_all(list(~sum)) %>%    # Add up the progeny counts from each vial/age class
+    ungroup() %>%
+    group_by(Haplotype, Order.of.exposure) %>% 
+    summarise(summ = list(posterior_summary(value))) %>%
+    ungroup() %>% rowwise() %>%
+    mutate(Estimate = summ[,1], Est.Error = summ[,2],
+           Q2.5 = summ[,3], Q97.5 = summ[,4],
+           Vial = "Total across all 4 vials") %>% select(-summ)
+  
+  group_means <- rbind(
+    posterior_group_means %>% select(Haplotype, Order.of.exposure, Vial, everything()),
+    mean_total_progeny    %>% select(Haplotype, Order.of.exposure, Vial, everything())) %>% 
+    mutate(Order.of.exposure = as.character(Order.of.exposure),
+           males = "No",
+           Vial = gsub("Vial", "", as.character(Vial)),
+           males = replace(males, Vial %in% c(1, 3) & Order.of.exposure == "First", "Yes"),
+           males = replace(males, Vial %in% c(2, 4) & Order.of.exposure == "Second", "Yes"),
+           Order.of.exposure = replace(Order.of.exposure, Order.of.exposure == "First", "Males in vials 1 and 3"),
+           Order.of.exposure = replace(Order.of.exposure, Order.of.exposure == "Second", "Males in vials 2 and 4")) %>%
+    rename(`Order of exposure` = Order.of.exposure,
+           `Males in the vial` = males) 
+    
+  
+  new <- experiment1 %>% 
+    select(Haplotype, Order.of.exposure) %>% 
+    distinct() 
+  
+  combos <- apply(t(combn(unique(new$Haplotype), 2)), 1, paste0, collapse = "_")
+  
+  post_summary <- function(posterior, col_name){
+    x <- posterior_summary(posterior) %>% round(2) %>% as.data.frame()
+    x <- tibble(Estimate = paste(x[,1], " (", x[,3], " to ", x[,4], ")", sep = ""),
+                SE = x[,2],
+                Significant = ifelse(sign(x[,3]) == sign(x[,4]), "*", " ")) 
+    names(x)[1] <- col_name
+    x
+  }
+  
+  # Find differences between haplotypes in total fecundity, separately for each Order.of.exposure treatment
+  haplotype_effect_total <- posterior_by_vial %>%
+    split(paste(.$Haplotype, .$Order.of.exposure)) %>% # Split by combination
+    cross2(.,.) %>%  # Pair up everything with everything (inefficent but easier coding)
+    map(function(x){
+      
+      haplo1 <- group_by(x[[1]], sample) %>% # sum across the 4 vials
+        summarise(Total.fecundity = sum(value))
+      haplo2 <- group_by(x[[2]], sample) %>%
+        summarise(Total.fecundity = sum(value))
+      
+      data.frame(para1 = x[[1]][1, c(4,5)], # Find which parameter space pair we are looking at
+                 para2 = x[[2]][1, c(4,5)], # Find posterior difference in total fecundity, and summarise it
+                 post_summary(haplo1$Total.fecundity - haplo2$Total.fecundity, "diff"),
+                 post_summary(abs(haplo1$Total.fecundity - haplo2$Total.fecundity) / haplo1$Total.fecundity, "rel") %>% select(-Significant, -SE)) 
+    }) %>% do.call("rbind", .) %>% 
+    filter(para1.Order.of.exposure == para2.Order.of.exposure,
+           paste(para1.Haplotype, para2.Haplotype, sep = "_") %in% combos) %>%
+    rename(`Haplotype 1` = para1.Haplotype, `Haplotype 2` = para2.Haplotype) %>%
+    mutate(`Order of exposure` = para1.Order.of.exposure,
+           Vial = "Total across all 4 vials") %>%
+    select(Vial, `Order of exposure`, `Haplotype 1`, `Haplotype 2`, 
+           diff, SE, rel, Significant) %>%
+    arrange(desc(`Order of exposure`), `Haplotype 1`, `Haplotype 2`) 
+  
+  
+  # Find differences between haplotypes for all combinations of time point and Order.of.exposure treatment
+  # Basically this examines all possible 2-way interaction terms for haplotype and Order.of.exposure, separately at each time point
+  haplotype_effect_by_vial <- posterior_by_vial %>%
+    split(paste(.$Haplotype, .$Order.of.exposure, .$Vial)) %>% # Split by combination
+    cross2(.,.) %>%  # Pair up everything with everything (inefficent but easier coding)
+    map(function(x){
+      data.frame(para1 = x[[1]][1, c(2,4,5)], # Find which parameter space pair we are looking at
+                 para2 = x[[2]][1, c(2,4,5)], # then compute the difference in fecundity: subtract posterior2 from posterior1, and summarise it (find median and CIs)
+                 post_summary(x[[1]]$value - x[[2]]$value, "diff"),
+                 post_summary(abs(x[[1]]$value - x[[2]]$value) / x[[1]]$value, "rel") %>% select(-Significant, -SE)) 
+    }) %>% do.call("rbind", .) %>%
+    filter(para1.Vial == para2.Vial,
+           para1.Order.of.exposure == para2.Order.of.exposure,
+           paste(para1.Haplotype, para2.Haplotype, sep = "_") %in% combos) %>%
+    rename(`Haplotype 1` = para1.Haplotype, `Haplotype 2` = para2.Haplotype) %>%
+    mutate(Vial = str_replace_all(para1.Vial, "Vial", "Vial "), 
+           `Order of exposure` = para1.Order.of.exposure) %>%
+    select(Vial, `Order of exposure`, `Haplotype 1`, `Haplotype 2`, 
+           diff, SE, rel, Significant) %>%
+    arrange(Vial, desc(`Order of exposure`), `Haplotype 1`, `Haplotype 2`)
+  
+  joint_haplotype_table <- bind_rows(haplotype_effect_total, 
+                                     haplotype_effect_by_vial) %>%
+    arrange(Vial) %>% rename(`Difference in fecundity` = diff,
+                             `Relative difference` = rel) %>% as_tibble()
+  
+  
+  # Find difference between halpos of the 'order of exposure' treatment
+  haplotype_exposure_effect_total <- posterior_by_vial %>%
+    split(paste(.$Haplotype)) %>%
+    cross2(.,.) %>%
+    map(function(x){
+      
+      summed_1 <- x[[1]] %>% group_by(sample, Order.of.exposure) %>%
+        summarise(value = sum(value)) # sum across all 4 vials
+      summed_2 <- x[[2]] %>% group_by(sample, Order.of.exposure) %>%
+        summarise(value = sum(value)) 
+      
+      effect.of.being.exposed.first1 <- summed_1$value[summed_1$Order.of.exposure == "First"] - 
+        summed_1$value[summed_1$Order.of.exposure == "Second"]
+      effect.of.being.exposed.first2 <- summed_2$value[summed_2$Order.of.exposure == "First"] - 
+        summed_2$value[summed_2$Order.of.exposure == "Second"]
+      
+      data.frame(para1 = x[[1]][, c(2,4)],
+                 para2 = x[[2]][, c(2,4)],
+                 post_summary(effect.of.being.exposed.first1 - effect.of.being.exposed.first2, "diff"),
+                 post_summary(abs(effect.of.being.exposed.first1 - effect.of.being.exposed.first2) / effect.of.being.exposed.first1, "rel") %>% select(-Significant, -SE),
+                 stringsAsFactors = FALSE)
+    }) %>% bind_rows() %>%
+    filter(paste(para1.Haplotype, para2.Haplotype, sep = "_") %in% combos) %>%
+    rename(`Haplotype 1` = para1.Haplotype, `Haplotype 2` = para2.Haplotype) %>%
+    mutate(Vial = "Total across all 4 vials") %>%
+    select(Vial, `Haplotype 1`, `Haplotype 2`, 
+           diff, SE, rel, Significant) %>%
+    arrange(`Haplotype 1`, `Haplotype 2`) %>% distinct()
+  
+  
+  haplotype_exposure_effect_by_vial <- posterior_by_vial %>%
+    split(paste(.$Haplotype, .$Vial)) %>%
+    cross2(.,.) %>%
+    map(function(x){
+      
+      effect.of.being.exposed.first1 <- x[[1]]$value[x[[1]]$Order.of.exposure == "First"] - 
+        x[[1]]$value[x[[1]]$Order.of.exposure == "Second"]
+      effect.of.being.exposed.first2 <- x[[2]]$value[x[[2]]$Order.of.exposure == "First"] - 
+        x[[2]]$value[x[[2]]$Order.of.exposure == "Second"]
+      
+      data.frame(para1 = x[[1]][, c(2,4)],
+                 para2 = x[[2]][, c(2,4)],
+                 post_summary(effect.of.being.exposed.first1 - effect.of.being.exposed.first2, "diff"),
+                 post_summary(abs(effect.of.being.exposed.first1 - effect.of.being.exposed.first2) / effect.of.being.exposed.first1, "rel") %>% select(-Significant, -SE),
+                 stringsAsFactors = FALSE)
+    }) %>% bind_rows() %>%
+    filter(para1.Vial == para2.Vial,
+           paste(para1.Haplotype, para2.Haplotype, sep = "_") %in% combos) %>%
+    rename(`Haplotype 1` = para1.Haplotype, `Haplotype 2` = para2.Haplotype) %>%
+    mutate(Vial = str_replace_all(para1.Vial, "Vial", "Vial ")) %>%
+    select(Vial, `Haplotype 1`, `Haplotype 2`, 
+           diff, SE, rel, Significant) %>%
+    arrange(Vial, `Haplotype 1`, `Haplotype 2`) %>% distinct()
+  
+  joint_haplotype_exposure_table <- bind_rows(haplotype_exposure_effect_total, 
+                                              haplotype_exposure_effect_by_vial) %>%
+    arrange(Vial) %>% rename(`Difference in effect of exposure order` = diff,
+                             `Relative difference` = rel) %>% as_tibble()
+  
+  # Range in fecundity across vials per haplotype (across both treatments)
+  range_in_fecundity <- posterior_by_vial %>% 
+    group_by(sample, Haplotype) %>%
+    summarise(range = max(value) - min(value)) %>% ungroup() 
+  
+  differences_in_range_in_fecundity <- range_in_fecundity %>%
+    split(.$Haplotype) %>%
+    cross2(.,.) %>%
+    map(function(x){
+      
+      data.frame(Haplotype_1 = x[[1]]$Haplotype,
+                 Haplotype_2 = x[[2]]$Haplotype,
+                 post_summary(x[[1]]$range - x[[2]]$range, "diff"))
+    }) %>% do.call("rbind", .) %>%
+    filter(paste(Haplotype_1, Haplotype_2, sep = "_") %in% combos) %>%
+    rename(`Haplotype 1` = Haplotype_1, `Haplotype 2` = Haplotype_2) %>%
+    select(`Haplotype 1`, `Haplotype 2`, 
+           diff, SE, Significant) %>%
+    arrange(`Haplotype 1`, `Haplotype 2`) %>% distinct() %>%
+    rename(`Difference in range of fecundity across vials` = diff)
+  
+  return(list(posterior_treatment_means = group_means, 
+              differences_between_haplos = joint_haplotype_table,
+              haplo_by_exposure_effects = joint_haplotype_exposure_table,
+              differences_in_range_in_fecundity = differences_in_range_in_fecundity))
+}
+
+# Helper for adding stars to the rows where the 95% CIs don't overlap zero
+add_significance_stars <- function(posterior_summary){
+  posterior_summary$xx <- " "
+  posterior_summary$xx[posterior_summary[,3] < 0 & posterior_summary[,4] < 0] <- "*"
+  posterior_summary$xx[posterior_summary[,3] > 0 & posterior_summary[,4] > 0] <- "*"
+  names(posterior_summary)[names(posterior_summary) == "xx"] <- " "
+  posterior_summary
+}
+```
+
+### Code to run models on offspring sex ratio
+
+```{r}
+run_sex_ratio_models <- function(dataset){
+  
+  if(dataset == "experiment1"){
+    dat <- experiment1
+    output1 <- "model_output/sex_ratio_exp1_model_selection.rds"
+    output2 <- "model_output/sex_ratio_exp1.rds"
+  } else {
+    dat <- experiment2
+    output1 <- "model_output/sex_ratio_exp2_model_selection.rds"
+    output2 <- "model_output/sex_ratio_exp2.rds"
+  }
+  
+  sex_ratio_full <- brm(Male.offspring | trials(Total) ~ Haplotype + (1 | Block) + (1 | Female),
+                        family = "binomial", control = list(adapt_delta = 0.99), save_all_pars = TRUE,
+                        iter = 40000, chains = 4, cores = 4,
+                        data = dat %>%
+                          mutate(Total = Male.offspring + Female.offspring) %>%
+                          filter(!is.na(Total)) %>%
+                          filter(Total > 0))
+  
+  sex_ratio_null <- brm(Male.offspring | trials(Total) ~ (1 | Block) + (1 | Female),
+                        family = "binomial", control = list(adapt_delta = 0.99), save_all_pars = TRUE,
+                        iter = 40000, chains = 4, cores = 4,
+                        data = dat %>%
+                          mutate(Total = Male.offspring + Female.offspring) %>%
+                          filter(!is.na(Total)) %>%
+                          filter(Total > 0))
+  
+  # Run model comparion of the models with and without mtDNA haplotype
+  comparison <- post_prob(sex_ratio_full, sex_ratio_null)
+  names(comparison)[grep("full", names(comparison))] <- "Male mtDNA"
+  names(comparison)[grep("null", names(comparison))] <- "No fixed effects"
+  comparison %>% as.list %>% as_tibble %>% 
+    gather(`Fixed effects`, `Posterior model probability`) %>% arrange(-`Posterior model probability`) %>%
+    saveRDS(output1)
+  
+  
+  data.frame(summary(sex_ratio_expt1_full)$fixed) %>%
+    rbind(data.frame(do.call("rbind", summary(sex_ratio_expt1_full)$random))) %>% 
+    add_significance_stars() %>% saveRDS(output2)
+}
+```
+
+
+### Generate all statistical results
+```{r run_or_load_models}
+# Run all the models listed in these "formula" objects
+if(!file.exists("model_output/exp2_model_ranks.rds")){
+  
+  formulas <- c(
+    "Haplotype * Order.of.exposure +",
+    "Haplotype + Order.of.exposure +",
+    "Haplotype +",
+    "Order.of.exposure +",
+    ""
+  )
+  
+  # Rank all the models by their posterior model probability (a bit like Bayesian AIC)
+  parse_model_ranks <- function(model_ranks, formulas){
+    names(model_ranks) <- formulas[as.numeric(str_extract(str_extract(names(model_ranks), '\\[[^()]+\\]'), "[:digit:]+"))]
+    names(model_ranks)[names(model_ranks) == ""] <- "Null"
+    model_ranks <- model_ranks %>% as.list %>% as_tibble %>% gather(model, posterior_prob) %>% arrange(-posterior_prob)
+    model_ranks$model <- substr(model_ranks$model, 1, nchar(model_ranks$model) - 2)
+    model_ranks$model[model_ranks$model == "Nu"] <- "Null"
+    names(model_ranks) <- c("Fixed effects", "Posterior model probability")
+    model_ranks$`Posterior model probability` <- format(model_ranks$`Posterior model probability`, nsmall = 3) 
+    model_ranks
+  }
+  
+  # Run all the models, save results in a list
+  experiment_1_results <- lapply(formulas, run_model, experiment = 1)
+  # Name the model list
+  names_formulae <- c(substr(formulas[1:(length(formulas) - 1)], 1, nchar(formulas[1:(length(formulas) - 1)]) - 2), "No fixed effects")
+  names(experiment_1_results) <- names_formulae
+  # Compute inter-group differences, using the full model
+  difference_tables_expt_1 <- make_difference_tables(experiment_1_results[[1]]$posterior_by_vial)
+  
+  # Compare the experiment 1 models using posterior model probability
+  exp1_model_ranks <- post_prob(experiment_1_results[[1]]$model, 
+                                experiment_1_results[[2]]$model,
+                                experiment_1_results[[3]]$model,
+                                experiment_1_results[[4]]$model,
+                                experiment_1_results[[5]]$model) %>% 
+    round(3) %>% parse_model_ranks(formulas)
+  
+  # Save the experiment 1 results to disk, then clean up
+  saveRDS(experiment_1_results[[1]], "model_output/experiment1_full_model.rds")
+  saveRDS(difference_tables_expt_1, "model_output/difference_tables_expt_1.rds")
+  saveRDS(exp1_model_ranks, "model_output/exp1_model_ranks.rds")
+  rm(list = c("experiment_1_results", "difference_tables_expt_1", "exp1_model_ranks"))
+  
+  # EXPERIMENT 2 - same again
+  experiment_2_results <- lapply(formulas, run_model, experiment = 2)
+  names(experiment_2_results) <- names_formulae
+  difference_tables_expt_2 <- make_difference_tables(experiment_2_results[[1]]$posterior_by_vial)
+  exp2_model_ranks <- post_prob(experiment_2_results[[1]]$model, 
+                                experiment_2_results[[2]]$model,
+                                experiment_2_results[[3]]$model,
+                                experiment_2_results[[4]]$model,
+                                experiment_2_results[[5]]$model) %>% 
+    round(3) %>% parse_model_ranks(formulas)
+  
+  # Save the experiment 2 results to disk, then clean up
+  saveRDS(experiment_2_results[[1]], "model_output/experiment2_full_model.rds")
+  saveRDS(difference_tables_expt_2, "model_output/difference_tables_expt_2.rds")
+  saveRDS(exp2_model_ranks, "model_output/exp2_model_ranks.rds")
+  rm(list = c("experiment_2_results", "difference_tables_expt_2", "exp2_model_ranks"))
+} 
+
+if(!file.exists("model_output/sex_ratio_exp1.rds")) run_sex_ratio_models("experiment1")
+if(!file.exists("model_output/sex_ratio_exp2.rds")) run_sex_ratio_models("experiment2")
+
+# If done already, just load the saved versions
+experiment1_full_model <- readRDS("model_output/experiment1_full_model.rds")
+experiment2_full_model <- readRDS("model_output/experiment2_full_model.rds")
+difference_tables_expt_1 <- readRDS("model_output/difference_tables_expt_1.rds")
+difference_tables_expt_2 <- readRDS("model_output/difference_tables_expt_2.rds")
+exp1_model_ranks <- readRDS("model_output/exp1_model_ranks.rds")
+exp2_model_ranks <- readRDS("model_output/exp2_model_ranks.rds")
+```
+
+
+## Diagnostic plots for the models
+
+### Model of Experiment 1
+
+The plot shows a density plot of the actual data (dark line), along with density plots of predicted data generated by 10 randomly selected draws from the posterior. The posterior does a reasonably good job of approximating the true distribution of the fecundity data from Experiment 1, suggesting that the model fit is good enough for reliable statistical inference. Since a multivariate model was used for Experiment 1, we have plotted the four response variables (i.e. fecundity in vials 1-4) separately.
+
+```{r pp_check1}
+grid.arrange(
+  pp_check(experiment1_full_model[[1]], resp = "Vial1") + labs(subtitle="Vial 1"),
+  pp_check(experiment1_full_model[[1]], resp = "Vial2") + labs(subtitle="Vial 2"),
+  pp_check(experiment1_full_model[[1]], resp = "Vial3") + labs(subtitle="Vial 3"),
+  pp_check(experiment1_full_model[[1]], resp = "Vial4") + labs(subtitle="Vial 4"))
+```
+
+
+### Model of Experiment 2
+
+The plot shows a density plot of the actual data (dark line), along with density plots of predicted data generated by 10 randomly selected draws from the posterior. The posterior does a reasonably good job of approximating the true distribution of the fecundity data from Experiment 2, suggesting that the model fit is good enough for reliable statistical inference. Since a univariate model was used for Experiment 2, the figure shows a single distribution of observations from all four vials.
+
+```{r pp_check2}
+grid.arrange(
+  pp_check(experiment2_full_model[[1]], resp = "Vial1") + labs(subtitle="Vial 1"),
+  pp_check(experiment2_full_model[[1]], resp = "Vial2") + labs(subtitle="Vial 2"),
+  pp_check(experiment2_full_model[[1]], resp = "Vial3") + labs(subtitle="Vial 3"),
+  pp_check(experiment2_full_model[[1]], resp = "Vial4") + labs(subtitle="Vial 4"))
+```
+
+
+
+## Experiment 1: Effect of mtDNA in males on female productivity
+
+### Statistical results
+
+#### Model selection table
+
+**Table 1**: The posterior probabilities for five models with different fixed effects, for Experiment 1. All models had the same random effect structure (i.e. a random intercept for each experimental block), and the same error distribution.  The model with the main effect _Haplotype_ and _Order of exposure_, but no 2-way interaction, fit the data much better than the other four models: it has >99% chance of being the best-fitting model in the set. 
+```{r}
+exp1_model_ranks %>%
+  pander(split.cell = 40, split.table = Inf)
+```
+
+
+#### Parameter estimates from the full model
+**Table S1**: Results of the 'full model' of Experiment 1, which contains the fixed factors Haplotype (i.e. the mitochondrial strain of the males), Order of exposure (i.e. whether the female first encountered males in her first or second vial), and their interaction. The model is a multivariate Bayesian generalized linear mixed model, with experimental block as a random factor and zero-inflated negative binomial errors. The Bayesian $R^2$ was `r experiment1_full_model$R2`. Note that the presence of $\hat{R}$ (Rhat) values > 1 (usually a sign that the model has not converged) is misleading in this case, because the results were obtained by running the same model on five imputed datasets (to handle missing values), which gives a false signal of non-convergence. The imputed missing values were mostly from Vial 4, due to an accident in which 7 females' fourth vials were lost (this explains the lower effective sample size for parameters involving Vial 4). 
+```{r warning=FALSE}
+save_and_display_table <- function(tabl, filename){
+  saveRDS(tabl, file.path("supp_tables", filename))
+  pander(tabl, split.cell = 40, split.table = Inf)
+}
+
+get_fixed_effects_with_p_values <- function(brms_model){
+  fixed_effects <- data.frame(summary(brms_model)$fixed) %>%
+    rownames_to_column("Parameter")
+  fixed_effects$p <- (100 - as.data.frame(p_direction(brms_model))$pd) / 100
+  fixed_effects %>% select(Parameter, everything())
+}
+
+get_random_effects <- function(brms_model){
+  random_effects <- data.frame(do.call("rbind", summary(brms_model)$random)) %>%
+    rownames_to_column("Parameter")
+  random_effects$p <- NA
+  random_effects %>% select(Parameter, everything())
+}
+
+get_fixed_effects_with_p_values(experiment1_full_model[[1]]) %>%
+  rbind(get_random_effects(experiment1_full_model[[1]])) %>% 
+  mutate(` ` = ifelse(p < 0.05, "*", " "),
+         ` ` = replace(` `, is.na(` `), " "),
+         p = format(round(p, 3), nsmall = 3)) %>%
+  save_and_display_table("tab_S1.rds")
+```
+
+
+
+### Treatment group means
+
+**Table S2**: Posterior treatment group means for Experiment 1, estimated from the full model. Each row shows the median, error, and 95% quantiles on the posterior mean progeny production for one combination of Haplotype, vial number (i.e. the age category of the focal flies), and order of exposure treatment.
+```{r}
+difference_tables_expt_1$posterior_treatment_means %>% 
+  mutate_if(is.numeric, round, 2) %>%
+  save_and_display_table("tab_S2.rds")
+```
+
+
+
+### Predicted average fitness for each group
+The figure shows the predicted average progeny count for each combination of predictors, as estimated from a model containing Haplotype and the Haplotype ${\times}$ Age interaction.
+
+```{r fig.width=11, results="hide", fig.showtext=TRUE}
+make_graph <- function(difference_tables, exp = 1){
+  
+  if(exp == 1){
+    difference_tables$posterior_treatment_means[difference_tables$posterior_treatment_means == "No"] <- "Low"
+    difference_tables$posterior_treatment_means[difference_tables$posterior_treatment_means == "Yes"] <- "High"
+    leg.name <- "Male exposure"
+  }
+  
+  if(exp == 2){
+    leg.name <- "Males present"
+  }
+  
+  pd <- position_dodge(0.18)
+  
+  print( difference_tables$posterior_treatment_means)
+  
+  difference_tables$posterior_treatment_means %>%
+    filter(Vial != "Total across all 4 vials") %>%
+    ggplot(aes(x = Vial,
+               y = Estimate,
+               group = `Order of exposure`)) +
+    geom_line(aes(linetype = `Order of exposure`), position = pd) +
+    geom_errorbar(aes(ymin = Estimate - Est.Error, ymax = Estimate + Est.Error), width = 0, position = pd, alpha = 0.4) +
+    geom_point(aes(fill = `Males in the vial`), size = 2, pch = 21, position = pd) +
+    scale_fill_brewer(palette = "Set3", name = leg.name) +
+    scale_linetype(name = "Exposure treatment") + 
+    facet_grid(~ Haplotype) +
+    xlab("Age category (3-day increments)") +
+    ylab("Mean number of progeny produced\n(posterior estimates \u00B1 95% CIs)") +
+    theme_bw(15) +
+    theme(panel.grid.minor.x = element_blank(),
+          text = element_text(family = "Lato"),
+          strip.background = element_rect(fill = "seashell")) +
+    guides(linetype = guide_legend(order=1),
+           fill = guide_legend(order=2))
+}
+
+fig1 <- make_graph(difference_tables_expt_1) + 
+  labs(title = "Experiment 1", 
+       subtitle = "DGRP-517 females interacting with mitochondrial strain males") 
+
+
+dir.create("figures", showWarnings = FALSE)
+ggsave("figures/fig1.pdf", fig1, width = 11, height = 6)
+
+fig1
+```
+<br></br>
+**Figure 1**: The posterior estimate of the average number of progeny produced in Experiment 1, for each combination of predictor variables. The points and error bars show the posterior average and the associated 95 credible intervals of model predictions derived from the mixed model shown in Table S1.
+
+
+### Quantifying differences among treatment groups
+
+**Table S3**: Posterior estimates of the differences in mean offspring production for each possible pairs of male haplotypes in Experiment 1, either within a particular vial or summed across the four vials, and split by 'Order of exposure' treatment. Males from the Dahomey, Israel and Sweden haplotypes were associated with higher offspring production than the Brownsville haplotype, and there were also differences between Dahomey and Sweden, Dahomey and Barcelona, and Israel and Sweden (particularly in vial 2; see Figures 1 and 3). Asterisks mark statistically significant differences. The numbers in parentheses are 95% credible intervals. The 'Relative difference' column gives the absolute difference in means divided by the mean for haplotype 1. 
+```{r}
+difference_tables_expt_1$differences_between_haplos %>%
+  mutate_if(is.numeric, round, 2) %>%
+  save_and_display_table("tab_S3.rds")
+```
+
+<br></br>
+
+**Table S4**: Average difference in the effect of the 'exposed first' and 'exposed second' treatments for each pair of male haplotypes in Experiment 1, split by vial or summed over all 4 vials. For example, a difference of 10 means that the effect of the 'exposed first' treatment was more positive by 10 progeny in one haplotype than the other. Only one comparison showed a significant difference: the offspring production of females paired with Dahomey males was more strongly affected by the order of exposure treatment than for females paired with Sweden males. Specifically, females benefitted from being housed with Dahomey males in the first vial rather than the second, but there was no such benefit for Sweden males (see Figure 1). The numbers in parentheses are 95% credible intervals, and the the 'Relative difference' column was calculated as in Table S3.
+```{r}
+difference_tables_expt_1$haplo_by_exposure_effects %>%
+  select(-`Relative difference`) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  save_and_display_table("tab_S4.rds")
+```
+
+<br></br>
+
+
+### Mortality data
+Only 8 deaths were observed in Experiment 1, so it is not useful to run a model to investigate mortality rate prediictors. Here, we simply present the number of females of each type that died or survived the experiment.
+
+**Table S5**: Number of female flies that died or survived in Experiment 1, by Haplotype and male exposure treatment. 
+```{r}
+survival_data_expt1 %>% 
+  group_by(Haplotype, Order.of.exposure) %>% 
+  summarise(nDeaths = sum(censored == 0), nSurvivors = sum(censored == 1)) %>%
+  save_and_display_table("tab_S5.rds")
+```
+
+### Sex ratio data
+
+#### Model selection table
+
+Posterior model probabilities, comparing models of offspring sex ratio with and without the fixed effect "male mtDNA haplotype". There was no indication that mtDNA haplotype explains variance in sex ratio. 
+```{r}
+readRDS("model_output/sex_ratio_exp1_model_selection.rds") %>% 
+  mutate(`Posterior model probability` = format(round(`Posterior model probability`, 3), 3)) %>%
+  pander(split.cell = 40, split.table = Inf)
+```
+
+#### Results of the sex ratio model
+
+**Table S6**: Results of the model of offspring sex ratio in Experiment 1, which contains the fixed factor Haplotype (i.e. the mitochondrial strain of the males) only. The model is a Bayesian generalized linear mixed model, with female ID and experimental block as crossed random factors and binomial errors
+
+```{r}
+sex_ratio_exp1 <- readRDS("model_output/sex_ratio_exp1.rds") 
+rownames(sex_ratio_exp1)[grep("sd", rownames(sex_ratio_exp1))] <- c("sd(Block)", "sd(Female)")
+sex_ratio_exp1 %>% save_and_display_table("tab_S6.rds")
+```
+
+
+
+## Experiment 2: Direct effect of mtDNA on female productivity
+
+### Statistical results
+
+#### Model selection table
+
+```{r echo=FALSE}
+haplo <- format(sum(as.numeric(exp2_model_ranks$`Posterior model probability`[str_detect(exp2_model_ranks$`Fixed effects`, "Haplotype")])), nsmall = 3)
+OoE <- format(sum(as.numeric(exp2_model_ranks$`Posterior model probability`[str_detect(exp2_model_ranks$`Fixed effects`, "Haplotype")])), nsmall = 3)
+```
+
+**Table 2**: The posterior probabilities for fifteen models with different fixed effects, for Experiment 2. No particular model was definitively better than the others, though we can be >90% sure that the top model contains no interaction terms. The probability that the predictor 'Haplotype' appears in the top model in this set was `r haplo`, while the corresponding figure for 'Order of exposure' was `r OoE`. To reduce the number of models that needed to be compared, all of the models compared contained the predictor 'Vial' since its effect on the response variable was obvious.
+```{r}
+exp2_model_ranks %>%
+  pander(split.cell = 40, split.table = Inf)
+```
+
+#### Parameter estimates from the full model
+
+**Table S7**: Results of the 'full model' of Experiment 2, which contains the fixed factors Haplotype (i.e. the mitochondrial strain of the males), Order of exposure (i.e. whether the female first encountered males in her first or second vial), Vial (i.e. in which of the four vials per female was the measurement taken), and all possible interactions. The model is a univariate Bayesian generalized linear mixed model, with experimental block as a random factor and zero-inflated negative binomial errors. The Bayesian $R^2$ was `r experiment2_full_model$R2`. 
+```{r warning=FALSE}
+get_fixed_effects_with_p_values(experiment2_full_model[[1]]) %>%
+  rbind(get_random_effects(experiment2_full_model[[1]])) %>% 
+  mutate(` ` = ifelse(p < 0.05, "*", " "),
+         ` ` = replace(` `, is.na(` `), " "),
+         p = format(round(p, 3), nsmall = 3)) %>%
+  save_and_display_table("tab_S7.rds")
+```
+
+
+### Treatment group means
+
+**Table S8**: Posterior treatment group means for Experiment 2, estimated from the full model. Each row shows the median, error, and 95% confidence limits on the posterior mean progeny production for one combination of Haplotype, vial number (i.e. the age category of the focal flies), and order of exposure treatment.
+```{r}
+difference_tables_expt_2$posterior_treatment_means %>% 
+  mutate_if(is.numeric, round, 2) %>%
+  save_and_display_table("tab_S8.rds")
+```
+
+
+
+### Predicted average fitness for each group
+The figure shows the predicted average progeny count for each combination of predictors, as estimated from a model containing Haplotype and the Haplotype ${\times}$ Age interaction.
+
+```{r fig.width=11, results="hide", fig.showtext=TRUE}
+fig2 <- make_graph(difference_tables_expt_2, exp = 2) + 
+  labs(title = "Experiment 2", 
+       subtitle = "Mitochondrial strain females interacting with DGRP-324 males") 
+
+ggsave("figures/fig2.pdf", fig2, width = 11, height = 6)
+fig2
+```
+<br></br>
+**Figure 2**: The average number of progeny produced in Experiment 2, for each combination of predictor variables. The coloured points show model predictions derived from the model shown in Table S1.
+
+
+### Quantifying differences among treatment groups
+
+**Table S9**: Posterior estimates of the differences in mean offspring production for each possible pairs of female haplotypes in Experiment 2, either within a particular vial or summed across the four vials, and split by 'Order of exposure' treatment. Females from the Barcelona haplotype tended to have lower offspring production than some of the others, but only in the 'Exposed second' treatment. There was also a difference in offspring production (summed over the four vials) between Dahomey and Sweden mitoline females. Asterisks mark statistically significant differences. The numbers in parentheses are 95% credible intervals. The 'Relative difference' column gives the absolute difference in means divided by the mean for haplotype 1. 
+```{r}
+difference_tables_expt_2$differences_between_haplos %>%
+  mutate_if(is.numeric, round, 2) %>%
+  save_and_display_table("tab_S9.rds") 
+```
+
+<br></br>
+
+**Table S10**: Average difference in the effect of the 'exposed first' and 'exposed second' treatments for each pair of female haplotypes in Experiment 2, split by vial or summed over all 4 vials. For example, a difference of 10 means that the effect of the 'exposed first' treatment was more positive by 10 progeny in one haplotype than the other. The offspring production of Dahomey females was significantly more sensitive to the order of exposure treatment than all four of the other haplotypes, in one or more of the vials tested. The numbers in parentheses are 95% credible intervals, and the the 'Relative difference' column was calculated as in Table S3.
+```{r}
+difference_tables_expt_2$haplo_by_exposure_effects %>%
+  select(-`Relative difference`) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  save_and_display_table("tab_S10.rds")
+```
+
+<!-- <br></br> -->
+<!-- **Table S11**: Table examining whether the difference between the most and least fecund vials (i.e. the highest and lowest points in Figure 1) differs between female mtDNA haplotypes in Experiment 2. To calculate the quantity shown in the third column, we first estimated the average difference in fecundity between the most and least fecund of the 4 vials, for each haplotype (across both 'Order of exposure' treatments). We then took the difference in this range between each pair of haplotypes. None of the effects were statistically significant, suggesting that female haplotypes did not differ in how much fecundity varied across vials. The numbers in parentheses are 95% credible intervals, and the the 'Relative difference' column was calculated as in Table S3. -->
+<!-- ```{r} -->
+<!-- difference_tables_expt_2$differences_in_range_in_fecundity %>% -->
+<!--   pander(split.cell = 40, split.table = Inf) -->
+<!-- ``` -->
+
+
+### Mortality data
+34 deaths were observed in Experiment 2, and so we also fit a survival model to test if the death rate differs between haplotypes or treatments. There was little evidence for an effect of haplotype, the Order of exposure treatment, or their interaction. 
+
+#### Number of deaths
+
+**Table S11**: Number of female flies that died or survived in Experiment 2, by Haplotype and male exposure treatment. 
+```{r}
+survival_data_expt2 %>% 
+  group_by(Haplotype, Order.of.exposure) %>% 
+  summarise(nDeaths = sum(censored == 0), nSurvivors = sum(censored == 1)) %>%
+  save_and_display_table("tab_S11.rds")
+```
+
+#### Model of mortality in Experiment 2
+
+```{r survival_model}
+if(!file.exists("model_output/survival_model_expt2.rds")){
+  survival_model_expt2 <- brm(Age_at_death | cens(censored) ~ Haplotype * Order.of.exposure + (1 | Block),
+                              data = survival_data_expt2 %>% mutate(Age_at_death = as.numeric(Vial)), 
+                              family = weibull, inits = "0",
+                              cores = 4, chains = 4, iter = 4000,
+                              control = list(adapt_delta = 0.999, max_treedepth = 15),
+                              seed = 1)
+  saveRDS(survival_model_expt2, file = "model_output/survival_model_expt2.rds")
+} else survival_model_expt2 <- readRDS("model_output/survival_model_expt2.rds")
+```
+
+
+**Table S12**: Results of a Weibull generalized linear mixed model with Haplotype and Order.of.exposure as fixed effects, block as a random effect. The response variable is age at death (expressed as Vial 1, 2, 3 or 4), with right-censoring for flies that survived the 12-day experiment. The death rates of females in Experiment 2 were not significantly affected by their mtDNA haplotype, and did not differ between flies exposed to males in the first or second vial.
+```{r}
+data.frame(summary(survival_model_expt2)$fixed) %>%
+  rbind(data.frame(do.call("rbind", summary(survival_model_expt2)$random))) %>% 
+  add_significance_stars() %>%
+  save_and_display_table("tab_S12.rds")
+```
+
+
+### Sex ratio data
+
+#### Model selection table
+
+Posterior model probabilities, comparing models of offspring sex ratio with and without the fixed effect "female mtDNA haplotype". There was no indication that mtDNA haplotype explains variance in sex ratio. 
+```{r}
+readRDS("model_output/sex_ratio_exp2_model_selection.rds") %>%
+  mutate(`Posterior model probability` = format(round(`Posterior model probability`, 3), 3)) %>%
+  mutate(`Fixed effects` = replace(`Fixed effects`, `Fixed effects` ==  "Male mtDNA", "Female mtDNA")) %>%
+  pander(split.cell = 40, split.table = Inf)
+```
+
+#### Results of the sex ratio model
+
+**Table S13**: Results of the model of offspring sex ratio in Experiment 2, which contains the fixed factor Haplotype (i.e. the mitochondrial strain of the females) only. The model is a Bayesian generalized linear mixed model, with female ID and experimental block as crossed random factors and binomial errors.
+
+```{r}
+sex_ratio_exp2 <- readRDS("model_output/sex_ratio_exp2.rds") 
+rownames(sex_ratio_exp2)[grep("sd", rownames(sex_ratio_exp2))] <- c("sd(Block)", "sd(Female)")
+sex_ratio_exp2 %>% save_and_display_table("tab_S13.rds")
+```
+
+
+
+## Synthesising both experiments in Figure 3
+
+### Make the top part of Figure 3
+
+The top part of Figure 3 shows the posterior estimates of the mean number of progeny produced for each mtDNA haplotype, summed over all 4 vials, and averaged over the 'Exposed first' and 'Exposed second' treatments. It aims to show the average fecundity of A) females living with males from each mtDNA haplotype (left panel), and B) females that carry each mtDNA (right panel).
+
+```{r results="hide", fig.showtext=TRUE, fig.height=5.2, fig.width=10}
+# Get the posterior for panel A
+post1 <- experiment1_full_model$posterior_by_vial %>%
+  group_by(Haplotype, Vial, sample) %>%
+  summarise(n_offspring = mean(value)) %>% ungroup() %>%
+  group_by(Haplotype, sample) %>%
+  summarise(n_offspring = sum(n_offspring)) %>% ungroup() %>% 
+  mutate(facet = "Experiment 1: indirect effect of male mtDNA")
+
+# Get the posterior for panel B
+post2 <- experiment2_full_model$posterior_by_vial %>%
+  group_by(Haplotype, Vial, sample) %>%
+  summarise(n_offspring = mean(value)) %>% ungroup() %>%
+  group_by(Haplotype, sample) %>%
+  summarise(n_offspring = sum(n_offspring)) %>% ungroup() %>% 
+  mutate(facet = "Experiment 2: direct effect of female mtDNA")
+
+fig3 <- bind_rows(post1, post2) %>%
+  ggplot(aes(Haplotype, n_offspring, fill = Haplotype)) + 
+  geom_eye(.width = c(0.50, 0.95)) + 
+  scale_fill_brewer(palette = "Pastel1") + 
+  facet_wrap(~ facet) + 
+  theme_bw() + 
+  coord_cartesian(ylim = c(60, 160)) +
+  xlab(NULL) + ylab(NULL) + 
+  theme(legend.position = "none",
+        strip.background = element_rect(fill = "seashell", colour = "black"), 
+        panel.border = element_rect(colour = "black", fill = NA),
+        panel.background= element_rect(fill = "white"),
+        text = element_text(family = "Lato"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Mean productivity for each mtDNA haplotype",
+       subtitle = "Posterior distribution (bars show the median and 50% and 95% CIs)") +
+  ylab("Mean progeny produced (summed over all four vials)")
+
+fig3 %>% ggsave(filename = "figures/fig3.pdf", width = 8.1, height = 5.2)
+rm(post1); rm(post2)
+
+fig3
+```
+
+
+
+### Make the bottom part of Figure 3
+This figure aims to show at a glance how the mtDNA haplotypes differ from one another, and to show which differences are 'significantly different' (defined as the 95% CIs on the posterior difference in means excluding 0). 
+
+```{r results="hide", fig.showtext=TRUE, fig.height=6, fig.width=12}
+fig4_data <- difference_tables_expt_1$differences_between_haplos %>% mutate(Experiment = "Experiment 1: indirect effect of male mtDNA") %>%
+  rbind(difference_tables_expt_2$differences_between_haplos %>% mutate(Experiment = "Experiment 2: direct effect of female mtDNA")) %>%
+  filter(Vial == "Total across all 4 vials") %>% 
+  mutate(Haplotype1 = `Haplotype 1`,
+         Haplotype2 = `Haplotype 2`,
+         treat = "Males present in 1st and 3rd vial", 
+         treat = replace(treat, `Order of exposure` == "Second", "Males present in 2nd and 4th vial")) 
+
+for(i in 1:nrow(fig4_data)) fig4_data$pair[i] <- paste0(sort(c(fig4_data$Haplotype1[i], fig4_data$Haplotype2[i])), collapse = " ")
+
+fig4_data <- fig4_data %>% group_by(pair, Experiment, treat) %>% 
+  summarise(sig = Significant[1],
+            `Difference in fecundity` = max(`Difference in fecundity`)) %>%
+  mutate(Haplotype1 = "a", Haplotype2 = "a")
+
+split <- strsplit(fig4_data$pair, split = " ") %>% 
+  do.call("rbind", .) %>% as.data.frame(stringsAsFactors = FALSE)
+
+for(i in 1:nrow(fig4_data)){
+  if(fig4_data$treat[i] == "Males present in 1st and 3rd vial"){
+    fig4_data$Haplotype1[i] <- split[i, 1]
+    fig4_data$Haplotype2[i] <- split[i, 2]
+  } else {
+    fig4_data$Haplotype1[i] <- split[i, 2]
+    fig4_data$Haplotype2[i] <- split[i, 1]
+  }
+}
+
+fig4_data <- fig4_data %>%
+  mutate(fill = abs(map_dbl(`Difference in fecundity`, 
+                            function(x) as.numeric(strsplit(x, split = " \\(")[[1]][1]))))
+
+fig4 <-  ggplot(fig4_data, aes(x = Haplotype1, y = Haplotype2, fill = fill))  +
+  geom_tile(colour = "black", size = 0.2) + 
+  geom_text(aes(label = sig), size = 6, vjust= 0.7) + 
+  geom_abline(linetype = 2, colour = "grey") + 
+  scale_fill_distiller(palette = "Purples", direction = 1, name = "Absolute difference\nin mean fecundity", limits = c(0, NA)) + 
+  facet_wrap( ~ Experiment) + 
+  scale_x_discrete(expand = c(0,0)) + 
+  scale_y_discrete(expand = c(0,0)) + 
+  xlab(NULL) + ylab(NULL) + 
+  theme(panel.grid = element_blank(), axis.ticks = element_blank(), 
+        strip.background = element_rect(fill = "seashell", colour = "black"), 
+        panel.border = element_rect(colour = "black", fill = NA),
+        panel.background= element_rect(fill = "white"),
+        text = element_text(family = "Lato"),
+        axis.text.x = element_text(angle = 45, hjust = 1)
+        ) +
+  labs(title = "Estimated difference in average total productivity between mtDNA haplotypes", 
+       subtitle = "Upper triangle: 'Exposed first' treatment     Lower triangle: 'Exposed second' treatment") 
+
+ggsave("figures/fig4.pdf", fig4, width = 10, height = 5.2)
+
+fig4
+```
+
+
+## Plot of offspring sex ratio in both experiments
+```{r fig.showtext=TRUE, fig.width = 10, fig.height = 5}
+sex_ratio_plot <- function(expt_data){
+  points <- expt_data %>%
+    group_by(Haplotype, Female) %>%
+    summarise(n = sum(Male.offspring, na.rm = T) + sum(Female.offspring, na.rm = T),
+              n_sons = sum(Male.offspring, na.rm = T),
+              prop_sons = 100*n_sons/ n)
+  
+  means <- points %>%
+    group_by(Haplotype) %>%
+    summarise(n = sum(n),
+              prop_sons = 100*sum(n_sons)/ n,
+              lower = 100*binom.test(sum(n_sons), n)$conf.int[1],
+              upper = 100*binom.test(sum(n_sons), n)$conf.int[2])
+  
+  points %>%
+    ggplot(aes(Haplotype, prop_sons)) +
+    geom_hline(yintercept = 50, linetype = 2) +
+    geom_point(pch = 21, aes(size = n, fill = Haplotype), position = position_jitter(0.2), alpha = 0.6) +
+    geom_errorbar(data=means, aes(ymin = lower, ymax = upper), width = 0, size = 1.5) +
+    geom_point(data=means, pch = 21, size = 3, fill = "white", stroke = 2) +
+    labs(y = NULL, x = NULL) +
+    theme_minimal() + 
+    theme(legend.position = "none")
+}
+
+fig_S1 <- grid.arrange(
+  sex_ratio_plot(experiment1) + 
+    labs(title = "Experiment 1", 
+         subtitle = "DGRP-517 females interacting with mitochondrial strain males"),
+  sex_ratio_plot(experiment2) + 
+    labs(title = "Experiment 2", 
+         subtitle = "Mitochondrial strain females interacting with DGRP-324 males"), 
+  ncol = 2, left = "% sons among adult offspring", 
+  bottom = "mtDNA haplotype"
+)
+fig_S1 %>% ggsave(filename = "figures/fig_S1.pdf", width = 10, height = 5)
+```
+
+**Figure S1**: Offspring sex ratio for all females in Experiments 1 (left) and 2 (right). The coloured points show the sex ratio for an individual female, with larger dots indicating a larger number of offspring. The black points show the mean sex ratio across females and its 95% confidence limits. 
+
+
+## Tables of raw data
+
+For completeness and for purposes of data archiving, we include the raw data in this report.
+
+Columns represent:
+
+**Block**: the block within which the female underwent experimentation.
+
+**Female**: ID of individual females
+
+**Haplotype**: The mtDNA haplotype of the males (in experiment 1) or females (experiment 2).
+
+**Male exposure**: Was the female exposed to a high or low density (or no males in Experiment 2) of males?
+
+**Vial**: Is the focal observation from the 1st, 2nd, 3rd, or 4th vial in which the female lived? This is a proxy for the age category of the flies (1: youngest, 4: oldest). Treated as a discrete variable, since there was a clearly non-linear relationship with fecundity.
+
+**Female offspring**: the number of female offspring produced by the female.
+
+**Male offspring**: the number of male offspring produced by the female.
+
+**Other**: offspring that were unable to be sexed.
+
+**Mortality**: Female deaths are coded '1', and female survival '0'.
+
+**Order of exposure**: Was this female allocated to the high male exposure treatment (coded as "First") or the low exposure treatment ("Second") in her first vial?
+
+### Experiment 1
+
+**Table S14**: The raw data for Experiment 1; NAs indicate missing data due to the accidental release or killing of the fly. Flies that died naturally had their offspring production recorded as zero for any subsequent vials.
+```{r}
+experiment1 %>%
+  save_and_display_table("tab_S14.rds")
+```
+
+### Experiment 2
+
+**Table S15**: The raw data for Experiment 2; NAs indicate missing data due to the accidental release or killing of the fly. Flies that died naturally had their offspring production recorded as zero for any subsequent vials.
+```{r}
+experiment2 %>%
+  save_and_display_table("tab_S15.rds")
+```
+
+
+
+## R session info
+The following gives information about the computing environment and R packages used to generate this report.
+```{r}
+sessionInfo() %>% pander(split.cell = 40, split.table = Inf)
+```
+

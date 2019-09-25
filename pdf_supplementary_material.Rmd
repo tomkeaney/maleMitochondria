@@ -1,0 +1,160 @@
+---
+output: pdf_document
+header-includes: 
+  \usepackage{booktabs}
+  \usepackage{microtype}
+  \usepackage{longtable}
+  \usepackage[margin=1in]{geometry}
+---
+
+```{r setup, include=FALSE, results='hide', warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(kableExtra)
+library(stringr)
+
+make_table <- function(file, LT = TRUE, digits = getOption("digits"), rm_order_col = FALSE, BT = TRUE){
+  tabl <- readRDS(file) 
+  if(rm_order_col) tabl <- tabl[, names(tabl) != "Order.of.exposure"]
+  names(tabl)[names(tabl) == "Significant"] <- " "
+  names(tabl)[names(tabl) == "Order.of.exposure"] <- "Order of exposure"
+  names(tabl)[names(tabl) == "l.95..CI"] <- "Q2.5"
+  names(tabl)[names(tabl) == "u.95..CI"] <- "Q97.5"
+  names(tabl)[names(tabl) == "Female.offspring"] <- "Daughters"
+  names(tabl)[names(tabl) == "Male.offspring"] <- "Sons"
+  kable(tabl, "latex", longtable = LT, booktabs = BT, digits = digits) %>%
+    kable_styling(latex_options = c("repeat_header", "scale_down"), font_size = 7)
+}
+R2_1 <- readRDS("model_output/experiment1_full_model.rds")$R2
+R2_2 <- readRDS("model_output/experiment2_full_model.rds")$R2
+```
+
+
+\newpage
+\pagenumbering{gobble}
+
+\begin{center}
+\huge{\textbf{Online Supplementary Material}}
+\end{center}
+
+\begin{center}
+\textbf{Mother's curse and indirect genetic effects: do males matter to mitochondrial genome evolution?}
+\end{center}
+
+\vspace{1.4cm}
+
+
+The figures and tables in this document, along with the with the R code used to generate them, can also be viewed online: \newline \textbf{https://tomkeaney.github.io/maleMitochondria/}.
+
+\newpage
+
+\begin{figure}[h]
+\includegraphics[width=1\textwidth]{figures/fig_S1.pdf}
+\end{figure}
+
+**Supplementary Figure 1**: Offspring sex ratio for all females in Experiments 1 (left) and 2 (right). The coloured points show the sex ratio for an individual female, with larger dots indicating a larger number of offspring. The black points show the mean sex ratio across females and its 95\% confidence limits.
+
+
+\newpage
+**Supplementary Table 1**: Results of the 'full model' of Experiment 1, which contains the fixed factors Haplotype (i.e. the mitochondrial strain of the males), Order of exposure (i.e. whether the female first encountered males in her first or second vial), and their interaction. The model is a multivariate Bayesian generalized linear mixed model, with experimental block as a random factor and zero-inflated negative binomial errors. The Bayesian $R^2$ was `r R2_1`. Note that the presence of $\hat{R}$ (Rhat) values > 1 (usually a sign that the model has not converged) is misleading in this case, because the results were obtained by running the same model on five imputed datasets (to handle missing values), which gives a false signal of non-convergence. The imputed missing values were mostly from Vial 4, due to an accident in which 7 females' fourth vials were lost (this explains the lower effective sample size for parameters involving Vial 4). 
+
+```{r, results='asis'}
+make_table("supp_tables/tab_S1.rds", digits = 2)
+```
+\newpage
+
+**Supplementary Table 2**: Posterior treatment group means for Experiment 1, estimated from the full model. Each row shows the median, error, and 95% quantiles on the posterior mean progeny production for one combination of Haplotype, vial number (i.e. the age category of the focal flies), and order of exposure treatment.
+```{r, results='asis'}
+make_table("supp_tables/tab_S2.rds", digits = 2)
+```
+\newpage
+
+**Supplementary Table 3**: Posterior estimates of the differences in mean offspring production for each possible pairs of male haplotypes in Experiment 1, either within a particular vial or summed across the four vials, and split by 'Order of exposure' treatment. Males from the Dahomey, Israel and Sweden haplotypes were associated with higher offspring production than the Brownsville haplotype, and there were also differences between Dahomey and Sweden, Dahomey and Barcelona, and Israel and Sweden (particularly in vial 2; see Figures 1 and 3). Asterisks mark statistically significant differences. The numbers in parentheses are 95% credible intervals. The 'Relative difference' column gives the absolute difference in means divided by the mean for haplotype 1. 
+```{r, results='asis'}
+make_table("supp_tables/tab_S3.rds", digits = 2) 
+```
+\newpage
+
+
+**Supplementary Table 4**: Average difference in the effect of the 'exposed first' and 'exposed second' treatments for each pair of male haplotypes in Experiment 1, split by vial or summed over all 4 vials. For example, a difference of 10 means that the effect of the 'exposed first' treatment was more positive by 10 progeny in one haplotype than the other. Only one comparison showed a significant difference: the offspring production of females paired with Dahomey males was more strongly affected by the order of exposure treatment than for females paired with Sweden males. Specifically, females benefitted from being housed with Dahomey males in the first vial rather than the second, but there was no such benefit for Sweden males (see Figure 1). The numbers in parentheses are 95% credible intervals, and the the 'Relative difference' column was calculated as in Table S3.
+```{r, results='asis'}
+make_table("supp_tables/tab_S4.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 5**: Number of female flies that died or survived in Experiment 1, by Haplotype and male exposure treatment. 
+```{r, results='asis'}
+make_table("supp_tables/tab_S5.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 6**: Results of the model of offspring sex ratio in Experiment 1, which contains the fixed factor Haplotype (i.e. the mitochondrial strain of the males) only. The model is a Bayesian generalized linear mixed model, with female ID and experimental block as crossed random factors and binomial errors. This model only had a posterior model probability of 1.8% when compared to the same model with Haplotype removed.  
+```{r, results='asis'}
+make_table("supp_tables/tab_S6.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 7**: Results of the 'full model' of Experiment 2, which contains the fixed factors Haplotype (i.e. the mitochondrial strain of the males), Order of exposure (i.e. whether the female first encountered males in her first or second vial), Vial (i.e. in which of the four vials per female was the measurement taken), and all possible interactions. The model is a univariate Bayesian generalized linear mixed model, with experimental block as a random factor and zero-inflated negative binomial errors. The Bayesian $R^2$ was `r R2_2`. 
+```{r, results='asis'}
+make_table("supp_tables/tab_S7.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 8**: Posterior treatment group means for Experiment 2, estimated from the full model. Each row shows the median, error, and 95% confidence limits on the posterior mean progeny production for one combination of Haplotype, vial number (i.e. the age category of the focal flies), and order of exposure treatment.
+```{r, results='asis'}
+make_table("supp_tables/tab_S8.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 9**: Posterior estimates of the differences in mean offspring production for each possible pairs of female haplotypes in Experiment 2, either within a particular vial or summed across the four vials, and split by 'Order of exposure' treatment. Females from the Barcelona haplotype tended to have lower offspring production than some of the others, but only in the 'Exposed second' treatment. There was also a difference in offspring production (summed over the four vials) between Dahomey and Sweden mitoline females. Asterisks mark statistically significant differences. The numbers in parentheses are 95% credible intervals. The 'Relative difference' column gives the absolute difference in means divided by the mean for haplotype 1. 
+```{r, results='asis'}
+make_table("supp_tables/tab_S9.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 10**: Average difference in the effect of the 'exposed first' and 'exposed second' treatments for each pair of female haplotypes in Experiment 2, split by vial or summed over all 4 vials. For example, a difference of 10 means that the effect of the 'exposed first' treatment was more positive by 10 progeny in one haplotype than the other. The offspring production of Dahomey females was significantly more sensitive to the order of exposure treatment than all four of the other haplotypes, in one or more of the vials tested. The numbers in parentheses are 95% credible intervals, and the the 'Relative difference' column was calculated as in Table S3.
+```{r, results='asis'}
+make_table("supp_tables/tab_S10.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 11**: Number of female flies that died or survived in Experiment 2, by Haplotype and male exposure treatment. 
+```{r, results='asis'}
+make_table("supp_tables/tab_S11.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 12**: Results of a Weibull generalized linear mixed model with Haplotype and Order.of.exposure as fixed effects, block as a random effect. The response variable is age at death (expressed as Vial 1, 2, 3 or 4), with right-censoring for flies that survived the 12-day experiment. The death rates of females in Experiment 2 were not significantly affected by their mtDNA haplotype, and did not differ between flies exposed to males in the first or second vial.
+```{r, results='asis'}
+make_table("supp_tables/tab_S12.rds", digits = 2)
+```
+\newpage
+ 
+ 
+**Supplementary Table 13**: Results of the model of offspring sex ratio in Experiment 2, which contains the fixed factor Haplotype (i.e. the mitochondrial strain of the females) only. The model is a Bayesian generalized linear mixed model, with female ID and experimental block as crossed random factors and binomial errors. This model only had a posterior model probability of 0.1% when compared to the same model with Haplotype removed.  
+```{r, results='asis'}
+make_table("supp_tables/tab_S13.rds", digits = 2)
+```
+\newpage
+
+<!-- ## Raw data for Experiment 1 -->
+
+<!-- NAs indicate missing data due to the accidental loss of the fly, the 'Other' column records the number of offspring whose sex was ambiguous, and 'Mortality' indicates whether or not this fly died naturally in the focal vial (or an earlier one). Flies that died naturally had their offspring production recorded as zero for any subsequent vials. -->
+<!-- ```{r, results='asis'} -->
+<!-- make_table("supp_tables/tab_S14.rds", digits = 2, rm_order_col=TRUE, BT=FALSE) -->
+<!-- ``` -->
+<!-- \newpage -->
+
+<!-- ## Raw data for Experiment 2 -->
+
+<!-- NAs indicate missing data due to the accidental loss of the fly, the 'Other' column records the number of offspring whose sex was ambiguous, and 'Mortality' indicates whether or not this fly died naturally in the focal vial (or an earlier one). Flies that died naturally had their offspring production recorded as zero for any subsequent vials. -->
+<!-- ```{r, results='asis'} -->
+<!-- make_table("supp_tables/tab_S15.rds", digits = 2, rm_order_col=TRUE, BT=FALSE) -->
+<!-- ``` -->
